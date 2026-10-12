@@ -59,16 +59,153 @@ Interface bắt buộc (agent/loop.py import và gọi hàm này nếu tồn t�
 """
 from __future__ import annotations
 
+import hashlib
+import json
+import logging
+import re
+import uuid
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
+
+from agent import ledger, tools
+from agent.policy import PolicyContext, check
+
+logger = logging.getLogger("agent.runner")
 
 REPORTS_DIR = Path(__file__).resolve().parent.parent / "reports"
 DEFAULT_LEDGER_PATH = REPORTS_DIR / "ledger.jsonl"
+CUSTOMERS_FILE = Path(__file__).resolve().parent.parent / "data" / "customers.json"
+
+RUN_TTL = timedelta(minutes=5)
+# Only digits from a bare corpus filename are ever accepted from Run A.
+_TICKET_FILENAME_RE = re.compile(r"^ticket-(\d{1,9})\.md$")
+
+# Run A holds the untrusted-content leg only; Run B holds the private-data leg
+# only. Neither run has egress, and no run ever has http_post in scope.
+RUN_A_SCOPES = ("search_docs",)
+RUN_B_SCOPES = ("read_customer",)
 
 
 class RunnerScaffoldPending(NotImplementedError):
-    """Only the original 3c stub uses this to enable the CP1/CP2 baseline."""
+    """Only the original 3c stub used this to enable the CP1/CP2 baseline."""
+
+
+def _args_hash(args: dict) -> str:
+    raw = json.dumps(args, sort_keys=True, ensure_ascii=False, default=str)
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def _guarded_call(*, tool_name: str, args: dict, fn, run_id: str, agent_id: str,
+                  principal_id: str, purpose: str, classification: str,
+                  agent_scopes: tuple[str, ...], expires_at: str,
+                  ledger_path: Path):
+    """Policy check -> ledger append -> (only if allowed) execute the tool.
+
+    Returns (allowed, result). The ledger entry is written BEFORE the tool
+    runs, so a tool call that cannot be audited never executes.
+    """
+    context = PolicyContext(
+        data_classification=classification,
+        request_purpose=purpose,
+        agent_owner=agent_id,
+        delegation_depth=0,
+        egress_enabled=False,
+        principal_id=principal_id,
+        requested_tool=tool_name,
+        agent_scopes=agent_scopes,
+        parent_scopes=(),
+        expires_at=expires_at,
+    )
+    allow, reason = check(context)
+    ledger.append({
+        "ts": datetime.now(timezone.utc).isoformat(),
+        "agent_id": agent_id,
+        "run_id": run_id,
+        "tool": tool_name,
+        "args_hash": _args_hash(args),
+        "classification": classification,
+        "decision": "allow" if allow else "deny",
+        "reason": reason or "no reason produced",
+        "on_behalf_of": principal_id,
+        "expires_at": expires_at,
+    }, ledger_path)
+    if not allow:
+        return False, None
+    try:
+        return True, fn()
+    except tools.ToolError as exc:
+        logger.warning("tool %s failed after allow: %s", tool_name, exc)
+        return True, None
+
+
+def _ticket_ids_from_docs(docs: list[dict]) -> list[int]:
+    """Sanitize Run A output down to typed ints taken from file NAMES only."""
+    ids: list[int] = []
+    for doc in docs:
+        match = _TICKET_FILENAME_RE.match(str(doc.get("id", "")))
+        if match:
+            ticket_id = int(match.group(1))
+            if ticket_id not in ids:
+                ids.append(ticket_id)
+    return ids
+
+
+def _customers_for_tickets(ticket_ids: list[int]) -> list[str]:
+    """Trusted mapping ticket_id -> customer_id via customers.json."""
+    wanted = set(ticket_ids)
+    customers = json.loads(CUSTOMERS_FILE.read_text(encoding="utf-8"))
+    found: list[str] = []
+    for record in customers:
+        related = record.get("related_tickets") or []
+        if wanted.intersection(related):
+            customer_id = str(record["customer_id"])
+            if customer_id not in found:
+                found.append(customer_id)
+    return found
 
 
 def handle(message: str, llm, log_dir: Path | None = None,
            principal_id: str = "support_l1") -> str:
-    raise RunnerScaffoldPending("BƯỚC 3c: implement trifecta split")
+    ledger_path = (Path(log_dir) / "ledger.jsonl") if log_dir else DEFAULT_LEDGER_PATH
+    run_id = str(uuid.uuid4())
+    expires_at = (datetime.now(timezone.utc) + RUN_TTL).isoformat()
+
+    common = dict(run_id=run_id, principal_id=principal_id,
+                  expires_at=expires_at, ledger_path=ledger_path)
+
+    # ---- Run A: untrusted content only (no read_customer, no http_post) ----
+    allowed, docs = _guarded_call(
+        tool_name="search_docs", args={"query": message},
+        fn=lambda: tools.search_docs(message),
+        agent_id="lab24-agent/run-a", purpose="summarize-tickets",
+        classification="internal", agent_scopes=RUN_A_SCOPES, **common)
+    if not allowed:
+        return "Request denied by policy."
+    docs = docs or []
+
+    # Detection is logged only; its customer_ids/target_url are never used.
+    try:
+        injected = llm.find_injection("\n\n".join(d["text"] for d in docs))
+    except Exception as exc:  # detection is best-effort telemetry
+        logger.warning("find_injection failed: %s", exc)
+        injected = None
+    if injected is not None:
+        logger.warning("injection detected in corpus (markers=%s); ignored by design",
+                       getattr(injected, "matched_markers", []))
+
+    # Boundary: only list[int] derived from filenames crosses A -> B.
+    ticket_ids = _ticket_ids_from_docs(docs)
+
+    # ---- Run B: private data, input is sanitized ticket ids only ----
+    for customer_id in _customers_for_tickets(ticket_ids):
+        ok, _record = _guarded_call(
+            tool_name="read_customer", args={"customer_id": customer_id},
+            fn=lambda cid=customer_id: tools.read_customer(cid),
+            agent_id="lab24-agent/run-b", purpose="support-reply",
+            classification="restricted", agent_scopes=RUN_B_SCOPES, **common)
+        if not ok:
+            continue
+        # Record is used for nothing further: no egress and no free-text
+        # round trip. It is dropped here (copy not retained).
+
+    return llm.summarize(docs)

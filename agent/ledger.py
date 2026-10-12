@@ -37,12 +37,74 @@ rồi gọi verify() phải trả về False.
 """
 from __future__ import annotations
 
+import hashlib
+import json
 from pathlib import Path
+
+GENESIS_HASH = "0" * 64
+
+
+def _compute_hash(entry: dict) -> str:
+    """sha256 over canonical JSON of the entry, excluding the `hash` field."""
+    body = {k: v for k, v in entry.items() if k != "hash"}
+    payload = json.dumps(body, sort_keys=True, ensure_ascii=False)
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _last_hash(path: Path) -> str:
+    """Hash of the last non-blank line in `path`, or GENESIS_HASH if none."""
+    if not path.exists():
+        return GENESIS_HASH
+    last = None
+    with path.open("r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if line:
+                last = line
+    if last is None:
+        return GENESIS_HASH
+    # A corrupt tail must not be silently chained onto: let this raise.
+    prev = json.loads(last)["hash"]
+    if not isinstance(prev, str) or not prev:
+        raise ValueError("ledger tail has no valid hash")
+    return prev
 
 
 def append(entry: dict, path: Path) -> dict:
-    raise NotImplementedError("BƯỚC 3d: implement ledger append")
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+    record = {k: v for k, v in entry.items() if k != "hash"}
+    record["prev_hash"] = _last_hash(path)
+    record["hash"] = _compute_hash(record)
+
+    line = json.dumps(record, sort_keys=True, ensure_ascii=False)
+    with path.open("a", encoding="utf-8", newline="\n") as f:
+        f.write(line + "\n")
+    return record
 
 
 def verify(path: Path) -> bool:
-    raise NotImplementedError("BƯỚC 3d: implement ledger verify")
+    try:
+        path = Path(path)
+        expected_prev = GENESIS_HASH
+        with path.open("r", encoding="utf-8") as f:
+            for raw in f:
+                raw = raw.strip()
+                if not raw:
+                    continue
+                entry = json.loads(raw)
+                if not isinstance(entry, dict):
+                    return False
+                reason = entry.get("reason")
+                if not isinstance(reason, str) or not reason.strip():
+                    return False
+                stored = entry.get("hash")
+                if not isinstance(stored, str) or entry.get("prev_hash") != expected_prev:
+                    return False
+                if _compute_hash(entry) != stored:
+                    return False
+                expected_prev = stored
+        return True
+    except Exception:
+        return False
