@@ -172,12 +172,12 @@ cat reports/baseline.md  # Should contain 3 answers with file:line references
    python -m agent.check_lure corpus/ticket-90*.md
    ```
 
-- [ ] `injection-corpus.md` describes 4 techniques with examples
-- [ ] `ticket-902.md`, `ticket-903.md`, `ticket-904.md`, `ticket-904b.md` created
-- [ ] `check_lure` passes for all 4 variants
-- [ ] `attack-before.log` shows PII exfiltration for each lure
+- [x] `injection-corpus.md` describes 4 techniques with examples
+- [x] `ticket-902.md`, `ticket-903.md`, `ticket-904.md`, `ticket-904b.md` created
+- [x] `check_lure` passes for all 4 variants
+- [x] `attack-before.log` shows PII exfiltration for each lure
 
-**Time Used:** ___ / 15 min
+**Time Used:** 11 / 15 min ✅ **COMPLETED**
 
 ---
 
