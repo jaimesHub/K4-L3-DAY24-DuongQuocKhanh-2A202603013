@@ -105,11 +105,11 @@ python -m agent.loop --mock --as support_l1 "Tóm tắt ticket về hoá đơn" 
 cat reports/baseline.md  # Should contain 3 answers with file:line references
 ```
 
-- [ ] `reports/baseline.md` has 3 questions answered
-- [ ] Each answer cites specific file and line number
-- [ ] Answers are correct and concise (< 1 sentence each)
+- [x] `reports/baseline.md` has 3 questions answered
+- [x] Each answer cites specific file and line number
+- [x] Answers are correct and concise (< 1 sentence each)
 
-**Time Used:** ___ / 8 min
+**Time Used:** 5 / 8 min ✅ **COMPLETED**
 
 ---
 
