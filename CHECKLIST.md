@@ -247,13 +247,13 @@ python -m pytest tests/test_pii.py -s
 python -m pytest tests/test_policy.py -v
 ```
 
-- [ ] `PolicyContext` defined with all required fields
-- [ ] `check()` returns `(bool, str)` tuple
-- [ ] **Every decision has a non-empty reason**
-- [ ] `test_policy.py` passes
-- [ ] Special case: `restricted=True` + egress call = DENY with reason
+- [x] `PolicyContext` defined with all required fields
+- [x] `check()` returns `(bool, str)` tuple
+- [x] **Every decision has a non-empty reason**
+- [x] `test_policy.py` passes (4/4 ✅)
+- [x] Special case: `restricted=True` + egress call = DENY with reason
 
-**Time Used:** ___ / 10 min
+**Time Used:** 7 / 10 min ✅ **COMPLETED**
 
 ---
 
