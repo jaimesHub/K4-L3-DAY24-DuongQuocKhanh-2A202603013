@@ -1,39 +1,76 @@
-"""BƯỚC 3a — PII gate TRƯỚC KHI vào context/store (12').
-
-Đọc CHECKPOINTS.md (§3a) trước khi bắt đầu: Presidio không có tiếng Việt
-sẵn (AnalyzerEngine() mặc định chỉ hỗ trợ "en"). Đường an toàn cho 2h là
-regex recognizer + deny-list cho PERSON — coi spaCy/transformers NER là
-stretch goal, KHÔNG bắt buộc.
-
-Interface bắt buộc (tests/test_pii.py gọi trực tiếp 2 hàm này):
-
-    detect(text: str) -> list[dict]
-        Mỗi entity: {"type": str, "start": int, "end": int}
-        `type` là một trong: "VN_CCCD", "VN_PHONE", "VN_BANK_ACCOUNT", "EMAIL"
-        `start`/`end` là offset ký tự trong `text` (offset đầu bao gồm,
-        offset cuối KHÔNG bao gồm — giống slice Python text[start:end]).
-        Format này khớp với tests/vn_pii_testset.jsonl.
-
-    redact(text: str) -> str
-        Trả về `text` sau khi mọi entity từ detect() bị thay bằng
-        "[REDACTED_<TYPE>]". Phải xử lý overlap/thứ tự đúng khi có nhiều
-        entity (gợi ý: thay từ cuối văn bản về đầu để offset không bị lệch).
-
-Gợi ý định dạng (không bắt buộc đúng regex này, miễn đạt ngưỡng trên test
-set ở tests/vn_pii_testset.jsonl):
-    VN_CCCD          12 chữ số liên tiếp
-    VN_PHONE         0 + 9-10 chữ số, có thể có dấu cách/gạch ngang
-    VN_BANK_ACCOUNT  8-16 chữ số liên tiếp, thường đi kèm "STK"/"số tài khoản"
-    EMAIL            dạng chuẩn local@domain.tld
-
-Đo bằng: pytest tests/test_pii.py -v -s   (in ra precision/recall)
-"""
 from __future__ import annotations
 
+import re
+from typing import Any, Dict, List, Optional
 
-def detect(text: str) -> list[dict]:
-    raise NotImplementedError("BƯỚC 3a: implement PII detection")
+_FLAGS = re.IGNORECASE | re.UNICODE
+
+_BANK_CONTEXT = re.compile(
+    r"(?:\bstk\b|\bs[oố]\s*t[aà]i\s*kho[aả]n\b|\bso\s*tk\b|\bt[aà]i\s*kho[aả]n\b|\bacc(?:ount)?(?:\s*(?:no|number|num))?\b)"
+    r"[^\d\n]{0,15}?(?P<v>\d(?:[ -]?\d){7,15})(?!\d)",
+    _FLAGS,
+)
+_EMAIL = re.compile(r"(?<![\w.+-])[\w.+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}", _FLAGS)
+_CCCD = re.compile(r"(?<![\d])\d{12}(?!\d)")
+_PHONE = re.compile(r"(?<![\w+])(?:\+84(?:[\s.-]?\d){9}|0(?:[\s.-]?\d){9})(?!\d)")
+_BANK = re.compile(r"(?<!\d)\d{9,16}(?!\d)")
+
+_TYPE_MAP = {
+    "CCCD": "VN_CCCD",
+    "PHONE": "VN_PHONE",
+    "BANK_ACCOUNT": "VN_BANK_ACCOUNT",
+    "EMAIL": "EMAIL",
+}
+_REVERSE_MAP = {v: k for k, v in _TYPE_MAP.items()}
 
 
-def redact(text: str) -> str:
-    raise NotImplementedError("BƯỚC 3a: implement PII redaction")
+def _overlaps(start: int, end: int, spans: List[tuple]) -> bool:
+    return any(start < e and s < end for s, e in spans)
+
+
+def detect(text: str) -> List[Dict[str, Any]]:
+    results: List[Dict[str, Any]] = []
+    taken: List[tuple] = []
+
+    def add(kind: str, start: int, end: int, confidence: float) -> None:
+        if _overlaps(start, end, taken):
+            return
+        taken.append((start, end))
+        results.append(
+            {
+                "pattern_type": kind,
+                "type": _TYPE_MAP[kind],
+                "start": start,
+                "end": end,
+                "value": text[start:end],
+                "confidence": confidence,
+            }
+        )
+
+    for m in _BANK_CONTEXT.finditer(text):
+        add("BANK_ACCOUNT", m.start("v"), m.end("v"), 0.95)
+    for m in _EMAIL.finditer(text):
+        add("EMAIL", m.start(), m.end(), 0.99)
+    for m in _CCCD.finditer(text):
+        add("CCCD", m.start(), m.end(), 0.9)
+    for m in _PHONE.finditer(text):
+        add("PHONE", m.start(), m.end(), 0.9)
+    for m in _BANK.finditer(text):
+        add("BANK_ACCOUNT", m.start(), m.end(), 0.6)
+
+    results.sort(key=lambda d: d["start"])
+    return results
+
+
+def redact(text: str, detections: Optional[List[Dict[str, Any]]] = None) -> str:
+    if detections is None:
+        detections = detect(text)
+    ordered = sorted(detections, key=lambda d: d["start"], reverse=True)
+    last_start = len(text) + 1
+    for d in ordered:
+        if d["end"] > last_start:
+            continue
+        kind = d.get("pattern_type") or _REVERSE_MAP.get(d.get("type", ""), d.get("type", "PII"))
+        text = text[: d["start"]] + f"[REDACTED-{kind}]" + text[d["end"] :]
+        last_start = d["start"]
+    return text
